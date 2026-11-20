@@ -35,50 +35,159 @@ function showPrecautions(value, time) {
 }
 const band=v=>[50,100,150,200,300,Infinity].findIndex(n=>v<=n);
 const cities=[['Jaipur','India',26.9124,75.7873],['Delhi','India',28.61,77.21],['Mumbai','India',19.076,72.878],['Bengaluru','India',12.97,77.59],['London','United Kingdom',51.507,-.128]];
-let city=cities[0],version=0,searchVersion=0,zoom=9,hours=24,points=[],history=[],sample=false,center=null;
+const cityZoom = 11;
+let city=cities[0],version=0,searchVersion=0,zoom=cityZoom,hours=24,points=[],history=[],sample=false,center=null;
 async function json(url){const r=await fetch(url,{signal:AbortSignal.timeout(8500)});if(!r.ok)throw Error();return r.json()}
 function api(lat,lon,extra){return 'https://air-quality-api.open-meteo.com/v1/air-quality?latitude='+lat+'&longitude='+lon+'&current=us_aqi&timeformat=unixtime'+extra}
 $('legend').innerHTML=cats.map((c,i)=>'<span><i style="background:'+colors[i]+'"></i>'+c+'</span>').join('');
-function world(lat,lon){const n=256*2**zoom,r=Math.min(85,Math.max(-85,lat))*Math.PI/180;return [(lon+180)/360*n,(1-Math.asinh(Math.tan(r))/Math.PI)/2*n]}
-let streetMap, markerLayer, mappedLocation, markerSignature;
-function map(){
-  if(!window.L){fallbackMap();return}
-  const element=$('map');
-  if(!element.clientWidth)return;
-  if(!streetMap){
+const mapAttribution = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>';
+const mapUnavailable = 'Some street map imagery is unavailable.';
+const mapStatus = () => $('mapnote');
+
+function loadStreetTile(img, {x, y, z}, onLoad, onError) {
+  const resolution = window.devicePixelRatio > 1 ? '@2x' : '';
+  img.alt = '';
+  img.setAttribute('role', 'presentation');
+  img.referrerPolicy = 'strict-origin-when-cross-origin';
+  img.onload = onLoad;
+  img.onerror = () => {
+    img.onerror = onError;
+    img.src = 'https://tile.openstreetmap.org/'+z+'/'+x+'/'+y+'.png';
+  };
+  img.src = 'https://basemaps.cartocdn.com/rastertiles/voyager/'+z+'/'+x+'/'+y+resolution+'.png';
+}
+
+let streetMap, markerLayer, mappedLocation, markerSignature, fallbackTileSignature;
+
+function map() {
+  const element = $('map');
+  if (!element.clientWidth) return;
+  if (!window.L) {
+    fallbackMap();
+    return;
+  }
+  if (!streetMap) {
     element.replaceChildren();
-    element.style.height='clamp(350px,48vh,540px)';
-    streetMap=L.map(element,{scrollWheelZoom:false}).setView([city[2],city[3]],10);
-    const streets=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(streetMap);
-    L.control.scale({imperial:false}).addTo(streetMap);
-    markerLayer=L.layerGroup().addTo(streetMap);
-    const control=L.control({position:'topright'});
-    control.onAdd=()=>{
-      const box=L.DomUtil.create('div','leaflet-bar');
-      const button=document.createElement('button');button.textContent='Recenter';button.type='button';
-      button.onclick=()=>{if(points.length>1)streetMap.fitBounds(points.map(([lat,lon])=>[lat,lon]),{padding:[30,30],maxZoom:12});else streetMap.setView([city[2],city[3]],10)};
-      box.append(button);L.DomEvent.disableClickPropagation(box);return box;
+    const home = [city[2], city[3]];
+    streetMap = L.map(element, {scrollWheelZoom: false, maxZoom: 19}).setView(home, cityZoom);
+    mappedLocation = home.join(',');
+    const StreetTiles = L.GridLayer.extend({
+      createTile(coords, done) {
+        const tile = document.createElement('img');
+        loadStreetTile(tile, coords, () => done(null, tile), () => {
+          tile.style.visibility = 'hidden';
+          done(new Error('Street tile unavailable'), tile);
+        });
+        return tile;
+      }
+    });
+    const streets = new StreetTiles({attribution: mapAttribution, maxNativeZoom: 19});
+    let missingTiles = 0;
+    streets.on('loading', () => { missingTiles = 0; });
+    streets.on('tileerror', () => { missingTiles++; });
+    streets.on('load', () => { mapStatus().textContent = missingTiles ? mapUnavailable : ''; });
+    mapStatus().textContent = '';
+    streets.addTo(streetMap);
+    L.control.scale({imperial: false}).addTo(streetMap);
+    markerLayer = L.layerGroup().addTo(streetMap);
+
+    const control = L.control({position: 'topright'});
+    control.onAdd = () => {
+      const box = L.DomUtil.create('div', 'leaflet-bar map-controls');
+      const button = document.createElement('button');
+      button.textContent = 'Recenter';
+      button.type = 'button';
+      button.onclick = () => {
+        if (points.length > 1) {
+          streetMap.fitBounds(points.map(([lat, lon]) => [lat, lon]), {padding: [34, 34], maxZoom: cityZoom});
+        } else {
+          streetMap.setView([city[2], city[3]], cityZoom);
+        }
+        if (missingTiles) streets.redraw();
+      };
+      box.append(button);
+      L.DomEvent.disableClickPropagation(box);
+      return box;
     };
     control.addTo(streetMap);
-    streets.on('tileerror',()=>{element.title='Street tiles could not load. Check your connection.'});
   }
-  streetMap.invalidateSize({pan:false});
-  const location=city.slice(2).join(',');
-  if(location!==mappedLocation){streetMap.setView([city[2],city[3]],10);mappedLocation=location}
-  const signature=JSON.stringify([location,points,sample]);
-  if(signature===markerSignature)return;
-  markerSignature=signature;markerLayer.clearLayers();
-  for(const [lat,lon,value] of points){
-    const label=(sample?'Sample':'Estimated')+' US AQI '+value+' · '+cats[band(value)];
-    const icon=L.divIcon({className:'aq-marker',html:'<b style="display:grid;place-items:center;height:100%;border-radius:20px;border:3px solid white;box-shadow:0 2px 8px #29403266;color:#172d23;background:'+colors[band(value)]+'">'+value+'</b>',iconSize:[46,32],iconAnchor:[23,16]});
-    L.marker([lat,lon],{icon,title:label,alt:label}).bindPopup(label+'<br>'+lat.toFixed(3)+'°, '+lon.toFixed(3)+'°').addTo(markerLayer);
+  streetMap.invalidateSize({pan: false});
+  const location = city.slice(2).join(',');
+  if (location !== mappedLocation) {
+    streetMap.setView([city[2], city[3]], cityZoom);
+    mappedLocation = location;
+  }
+  const signature = JSON.stringify([location, points, sample]);
+  if (signature === markerSignature) return;
+  markerSignature = signature;
+  markerLayer.clearLayers();
+  for (const [lat, lon, value] of points) {
+    const label = (sample ? 'Sample' : 'Estimated')+' US AQI '+value+' · '+cats[band(value)];
+    const icon = L.divIcon({
+      className: 'aq-marker',
+      html: '<b style="background:'+colors[band(value)]+'">'+value+'</b>',
+      iconSize: [42, 32],
+      iconAnchor: [21, 16]
+    });
+    L.marker([lat, lon], {icon, title: label, alt: label})
+      .bindPopup(label+'<br>'+lat.toFixed(3)+'°, '+lon.toFixed(3)+'°')
+      .addTo(markerLayer);
   }
 }
-function fallbackMap(){const el=$('map'),w=el.clientWidth,h=el.clientHeight,[cx,cy]=world(city[2],city[3]),left=cx-w/2,top=cy-h/2,tiles=$('tiles');tiles.replaceChildren();$('mapnote').textContent='';for(let x=Math.floor(left/256);x<=Math.floor((left+w)/256);x++)for(let y=Math.floor(top/256);y<=Math.floor((top+h)/256);y++){if(y<0||y>=2**zoom)continue;const img=document.createElement('img');img.alt='';img.style.left=(x*256-left)+'px';img.style.top=(y*256-top)+'px';img.onerror=()=>{img.hidden=true;$('mapnote').textContent='Base map offline · coordinate grid'};img.src='https://tile.openstreetmap.org/'+zoom+'/'+((x+2**zoom)%2**zoom)+'/'+y+'.png';tiles.append(img)}
-$('markers').replaceChildren();for(const [lat,lon,val] of points){const [x,y]=world(lat,lon),b=document.createElement('button');b.className='pin';b.style.cssText='left:'+(x-left)+'px;top:'+(y-top)+'px;background:'+colors[band(val)];b.textContent=val;b.title=(sample?'Sample':'Estimated')+' US AQI at '+lat.toFixed(2)+', '+lon.toFixed(2);b.onclick=()=>{$('mapnote').textContent=b.title+' · '+cats[band(val)]};$('markers').append(b)}}
+
+function world(lat, lon) {
+  const size = 256 * 2**zoom;
+  const radians = Math.min(85.05112878, Math.max(-85.05112878, lat)) * Math.PI / 180;
+  return [(lon + 180) / 360 * size, (1 - Math.asinh(Math.tan(radians)) / Math.PI) / 2 * size];
+}
+
+function fallbackMap() {
+  const element = $('map');
+  const [cx, cy] = world(city[2], city[3]);
+  const left = cx - element.clientWidth / 2;
+  const top = cy - element.clientHeight / 2;
+  const tileCount = 2**zoom;
+  const tiles = $('tiles');
+  const signature = [zoom, left, top, element.clientWidth, element.clientHeight].join(',');
+  if (signature !== fallbackTileSignature) {
+    fallbackTileSignature = signature;
+    tiles.replaceChildren();
+    mapStatus().textContent = '';
+    for (let x = Math.floor(left / 256); x <= Math.floor((left + element.clientWidth) / 256); x++) {
+      for (let y = Math.floor(top / 256); y <= Math.floor((top + element.clientHeight) / 256); y++) {
+        if (y < 0 || y >= tileCount) continue;
+        const img = document.createElement('img');
+        img.style.left = (x * 256 - left)+'px';
+        img.style.top = (y * 256 - top)+'px';
+        tiles.append(img);
+        loadStreetTile(img, {x: (x % tileCount + tileCount) % tileCount, y, z: zoom}, null, () => {
+          img.hidden = true;
+          if (img.isConnected) mapStatus().textContent = mapUnavailable;
+        });
+      }
+    }
+  }
+
+  const markers = $('markers');
+  markers.replaceChildren();
+  for (const [lat, lon, value] of points) {
+    const [x, y] = world(lat, lon);
+    const button = document.createElement('button');
+    button.className = 'pin';
+    const worldWidth = tileCount * 256;
+    const nearestX = x + Math.round((cx - x) / worldWidth) * worldWidth;
+    button.style.left = (nearestX - left)+'px';
+    button.style.top = (y - top)+'px';
+    button.style.background = colors[band(value)];
+    button.textContent = value;
+    button.title = (sample ? 'Sample' : 'Estimated')+' US AQI at '+lat.toFixed(2)+', '+lon.toFixed(2);
+    button.onclick = () => { mapStatus().textContent = button.title+' · '+cats[band(value)]; };
+    markers.append(button);
+  }
+}
 function plot(){const data=history.slice(-hours),svg=$('plot');if(!data.length){svg.textContent='Hourly data unavailable.';$('summary').textContent='';return}const vals=data.map(p=>p[1]).filter(Number.isFinite);if(!vals.length){svg.textContent='Hourly data unavailable.';$('summary').textContent='';return}const max=Math.max(50,Math.ceil(Math.max(...vals)/50)*50),x=i=>38+360*i/Math.max(1,data.length-1),y=v=>128-104*v/max;let path='',pen=false;data.forEach((p,i)=>{if(!Number.isFinite(p[1])){pen=false;return}path+=(pen?'L':'M')+x(i)+' '+y(p[1]);pen=true});const ticks=[0,max/2,max].map(v=>'<path stroke="#dce6dc" d="M38 '+y(v)+'h360"/><text x="2" y="'+(y(v)+4)+'">'+v+'</text>').join('');const date=t=>new Date(t*1000).toLocaleString('en-GB',hours===24?{hour:'2-digit',minute:'2-digit',timeZone:'UTC'}:{month:'short',day:'numeric',timeZone:'UTC'});svg.innerHTML='<svg viewBox="0 0 410 160" role="img" aria-label="Hourly US AQI trend" fill="#546d60" font-size="12">'+ticks+'<path d="'+path+'" stroke="#28754e" stroke-width="3" fill="none"/><text x="38" y="151">'+date(data[0][0])+'</text><text text-anchor="end" x="398" y="151">'+date(data.at(-1)[0])+' UTC</text></svg>';$('summary').textContent=(sample?'Sample range':'AQI range')+' · '+Math.min(...vals)+'–'+Math.max(...vals)+' over '+(hours===24?'24 hours':'7 days')}
 function display(v,time){const i=band(v);$('aqi').textContent=v;$('category').textContent=i===2?'Unhealthy for sensitive groups':cats[i];$('category').style.background=colors[i];$('stamp').textContent=sample?'Sample data · live feed unavailable':(Math.abs(Date.now()/1000-time)>10800?'Delayed model estimate':'Current model estimate')+' · '+new Date(time*1000).toLocaleString();showPrecautions(v,time);explain(v,time);plot();map()}
-async function load(c){const id=++version;city=c;resetTools();resetInsights();updateVisibility(c,id);points=[];history=[];sample=false;zoom=9;$('place').textContent=c.slice(0,2).filter(Boolean).join(', ');$('aqi').textContent='—';$('category').textContent='Loading';$('category').style.background='#eee';$('stamp').textContent='Retrieving current estimate…';safetyStatus('Checking pollution levels…','Waiting for a current estimate for '+$('place').textContent+'.');plot();map();
+async function load(c){const id=++version;city=c;resetTools();resetInsights();updateVisibility(c,id);points=[];history=[];sample=false;zoom=cityZoom;$('place').textContent=c.slice(0,2).filter(Boolean).join(', ');$('aqi').textContent='—';$('category').textContent='Loading';$('category').style.background='#eee';$('stamp').textContent='Retrieving current estimate…';safetyStatus('Checking pollution levels…','Waiting for a current estimate for '+$('place').textContent+'.');plot();map();
 const offsets=[[0,0],[-.09,-.21],[.105,-.25],[.08,.23],[-.12,.21]],coords=offsets.map(([a,b])=>[Math.max(-89,Math.min(89,c[2]+a)),((c[3]+b+540)%360)-180]);
 try{const d=await json(api(c[2],c[3],'&hourly=us_aqi,'+pollutants.map(p=>'us_aqi_'+p[0]).join(',')+'&past_days=31&forecast_days=4&timezone=auto'));if(id!==version)return;if(!Number.isFinite(d.current?.us_aqi))throw Error();const t=d.current.time,v=Math.round(d.current.us_aqi);history=(d.hourly?.time||[]).map((s,i)=>[s,d.hourly.us_aqi[i]]).filter(p=>p[0]<=t);prepareTools(d);showInsights(d);points=[[c[2],c[3],v]];display(v,t);try{const near=coords.slice(1),rows=await json(api(near.map(p=>p[0].toFixed(4)),near.map(p=>p[1].toFixed(4)),''));if(id!==version)return;rows.forEach((r,i)=>{if(Number.isFinite(r.current?.us_aqi))points.push([...near[i],Math.round(r.current.us_aqi)])});map()}catch{}}
 catch{if(id!==version)return;if(c[0]==='Jaipur'&&Math.abs(c[2]-26.91)<.1){sample=true;const t=Math.floor(Date.now()/3600000)*3600;history=Array.from({length:168},(_,i)=>[t-(167-i)*3600,Math.round(115+28*Math.sin(i*.27)+10*Math.cos(i*.58))]);const v=history.at(-1)[1];points=coords.map((p,i)=>[...p,[v,92,134,159,109][i]]);display(v,t)}else{$('category').textContent='Unavailable';$('stamp').textContent='Live feed unavailable. Search again to retry.';safetyStatus('Current alert unavailable','Check local air-quality advisories for '+$('place').textContent+'.')}}}
